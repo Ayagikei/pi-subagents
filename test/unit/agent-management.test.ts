@@ -8,6 +8,8 @@ import { clearSkillCache } from "../../src/agents/skills.ts";
 
 let tempDir = "";
 let oldAgentDir: string | undefined;
+let oldHome: string | undefined;
+let oldUserProfile: string | undefined;
 
 function readText(result: { content: Array<{ type: string; text?: string }> }): string {
 	const first = result.content[0];
@@ -21,13 +23,21 @@ describe("agent management config parsing", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-management-"));
 		oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+		oldHome = process.env.HOME;
+		oldUserProfile = process.env.USERPROFILE;
 		process.env.PI_CODING_AGENT_DIR = path.join(tempDir, "agent-home");
+		process.env.HOME = path.join(tempDir, "home");
+		process.env.USERPROFILE = path.join(tempDir, "home");
 		clearSkillCache();
 	});
 
 	afterEach(() => {
 		if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+		if (oldHome === undefined) delete process.env.HOME;
+		else process.env.HOME = oldHome;
+		if (oldUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = oldUserProfile;
 		clearSkillCache();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});

@@ -39,3 +39,10 @@ For broad or uncertain requests, read more than one reference. For complex work,
 - Escalate unresolved product, architecture, authority, release, merge, or safety decisions upward instead of letting a child decide silently.
 - Treat receipts, CI, review bots, and external-run records as evidence, not authority to merge, close, comment, publish, or release.
 - As a conservative orchestration policy, do not pass `turnBudget`, a hard `toolBudget`, or a tight `usageBudget` to mutation-capable workers. The default tool budget blocks read/search tools rather than mutation tools, and reported usage has no reservation model. If a worker is interrupted after a tool call starts, checkpoint after the current tool returns with changed files, build/test state, and commit or PR state.
+
+## Async and context semantics
+
+- `subagent({ async: true, workflowScript })` backgrounds the workflow. Inside it, omitted/`async: false` `runs.run` and `runs.all` children remain awaited and return their actual output.
+- An awaited workflow child inherits the workflow's one absolute deadline when one exists. It does not invent the standalone 30-minute foreground default when no workflow deadline exists; explicit child or agent limits may only shorten the parent deadline.
+- A child with explicit `async: true` is detached: it does not inherit the workflow deadline, and awaiting its launch returns a detached receipt rather than completion output. Use `status` or `subagent_wait` to supervise it.
+- `context: "fresh"` does not copy the parent transcript. `context: "fork"` copies the persisted parent history and can exceed the model context before the child's first request. Magic Context can compact a child only after it starts; it cannot rescue an oversized initial fork snapshot or enlarge the model window. For a large parent, use a fresh child and a small handoff instead of resuming the oversized child.

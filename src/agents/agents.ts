@@ -611,6 +611,8 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 }
 
 function isProjectRootCandidate(dir: string): boolean {
+	// ~/.pi and ~/.agents are user-level config, not project roots for children of $HOME.
+	if (path.resolve(dir) === path.resolve(os.homedir())) return false;
 	return isDirectory(getProjectConfigDir(dir)) || isDirectory(path.join(dir, ".agents"));
 }
 

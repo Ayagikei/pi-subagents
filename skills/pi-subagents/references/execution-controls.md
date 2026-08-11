@@ -45,7 +45,11 @@ subagent({
 `context: "fork"` creates a branched child session from the current persisted
 parent session. It does **not** create a fresh minimal review context or filter
 history down to only the relevant parts. Use it when you want a separate review
-or execution thread that can still reference the parent session history.
+or execution thread that can still reference the parent session history. A large
+fork can exceed the model context before the first child request; Magic Context
+can compact later child history but cannot repair that initial snapshot. Prefer
+`context: "fresh"` plus a small handoff for large parents, and do not resume an
+already oversized child.
 
 Foreground results, async status, fleet, and widget surfaces label each child with
 its resolved launch context as `[fresh]` or `[fork]`. Aggregate headers show
@@ -69,6 +73,8 @@ subagent({
 ```
 
 Scripts run in a timed worker with only `runs.run`, `runs.all`, `runs.status`, `runs.ref/refs`, `prompts.render`, `emit`, captured `console`, and standard JavaScript. `await prompts.render("package:<name>" | "user:<name>" | "project:<name>", vars?)` reads a named Markdown fragment through the host resolver, applies simple scalar `{{name}}` interpolation, and returns plain task text. It does not give the script filesystem access. Pass the rendered text explicitly as `task` to `runs.run`. Mission-attached workflows also get `await state.get(key)` and `await state.set(key, value)` for durable JSON state shared across workflows on the same mission; `mission: false` workflows have no `state` global. Stable keys are required. An async workflow runs in the background, but its awaited `runs.run`/`runs.all` children still return actual child output. An explicit workflow timeout is one absolute deadline shared by awaited children; omitted child timeouts stay omitted, while explicit child or agent defaults are capped by the parent deadline. Child launches follow ordinary single-agent execution controls. Give each child a distinct decision and output path when reports must outlive the workflow, then consume the aggregate workflow result before opening individual reports.
+
+Workflow `async` and child `async` are separate controls. The outer `async: true` backgrounds the workflow; an omitted/`false` child is still awaited and inherits the workflow's absolute deadline when one exists. An explicit child `async: true` is detached, does not inherit that deadline, and returns a launch receipt rather than final output to the script. Without a workflow deadline, awaited children have no invented 30-minute default; standalone foreground launches retain their package default. Explicit child/agent limits can only tighten a workflow deadline.
 
 For one host-run verification command, pass `gate: "npm test"` on a `runs.run`/`runs.all` item (or at the top level as a workflow default). It is shorthand for verified acceptance with that single command: the runtime executes it on the host, records the result as evidence, and memoizes it per tracked workspace state and effective environment. `gate` cannot be combined with `acceptance`; use explicit `acceptance.verify` for multiple commands or custom criteria.
 
