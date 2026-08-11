@@ -244,6 +244,8 @@ interface ExecutorToolResult {
 		controlEvents?: Array<{ type?: string }>;
 		asyncId?: string;
 		timeoutMs?: number;
+		deadlineAt?: number;
+		results?: Array<{ timeoutMs?: number; deadlineAt?: number }>;
 		turnBudget?: { maxTurns: number; graceTurns: number };
 		artifacts?: { dir: string; files: ArtifactPaths[] };
 	};
@@ -591,6 +593,264 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.isError, true);
 		assert.match(result.content[0]?.text ?? "", /does not support: model override/);
 		assert.equal(mockPi.callCount(), 0);
+	});
+
+	it("applies and caps the parent deadline for retained awaited resumes at the executor", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "retained inherited" });
+		mockPi.onCall({ output: "retained capped" });
+		const sourceRunId = `retained-deadline-source-${Date.now()}`;
+		const sourceAsyncDir = path.join(DIRS.async, sourceRunId);
+		const sessionFile = path.join(tempDir, "retained-deadline-session.jsonl");
+		fs.mkdirSync(sourceAsyncDir, { recursive: true });
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		fs.writeFileSync(path.join(sourceAsyncDir, "status.json"), JSON.stringify({
+			runId: sourceRunId,
+			sessionId: "session-123",
+			mode: "single",
+			state: "complete",
+			startedAt: 100,
+			lastUpdate: 200,
+			cwd: tempDir,
+			sessionFile,
+			steps: [{ agent: "echo", status: "complete", sessionFile }],
+		}, null, 2), "utf-8");
+		const executor = makeExecutor([makeAgent("echo")]);
+		let revivedIds: string[] = [];
+		try {
+			const result = await executor.execute(
+			`workflow-retained-deadline-${Date.now()}`,
+			{
+				async: false,
+				timeoutMs: 10_000,
+				workflowScript: `
+					const inherited = await runs.run("inherited", { resume: "${sourceRunId}", task: "Continue with inherited deadline" });
+					const capped = await runs.run("capped", { resume: inherited.runId, task: "Continue with a shorter timeout", timeoutMs: 500 });
+					return { inheritedRunId: inherited.runId, cappedRunId: capped.runId };
+				`,
+			},
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, undefined, result.content[0]?.text);
+			const parentDeadlineAt = result.details?.deadlineAt;
+			assert.equal(typeof parentDeadlineAt, "number");
+			const value = result.details?.workflow?.value as { inheritedRunId?: string; cappedRunId?: string } | undefined;
+			assert.ok(value?.inheritedRunId);
+			assert.ok(value?.cappedRunId);
+			revivedIds = [value.inheritedRunId, value.cappedRunId];
+			const inheritedStatus = JSON.parse(fs.readFileSync(path.join(DIRS.async, value.inheritedRunId, "status.json"), "utf-8")) as AsyncStatus;
+			const cappedStatus = JSON.parse(fs.readFileSync(path.join(DIRS.async, value.cappedRunId, "status.json"), "utf-8")) as AsyncStatus;
+			assert.equal(inheritedStatus.state, "complete");
+			assert.equal(inheritedStatus.deadlineAt, parentDeadlineAt);
+			assert.equal(cappedStatus.state, "complete");
+			assert.ok((cappedStatus.timeoutMs ?? 0) > 0 && (cappedStatus.timeoutMs ?? Number.POSITIVE_INFINITY) <= 500);
+			assert.ok((cappedStatus.deadlineAt ?? Number.POSITIVE_INFINITY) < parentDeadlineAt);
+		} finally {
+			fs.rmSync(sourceAsyncDir, { recursive: true, force: true });
+			for (const runId of revivedIds) fs.rmSync(path.join(DIRS.async, runId), { recursive: true, force: true });
+		}
+	});
+
+	it("cancels awaited children when an async workflow reaches its deadline", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ delay: 10_000 });
+		const executor = makeExecutor([makeAgent("echo")]);
+		const started = await executor.execute(
+			`workflow-timeout-${Date.now()}`,
+			{
+				async: true,
+				timeoutMs: 200,
+				workflowScript: `await runs.run("slow", { agent: "echo", task: "Wait for completion" });`,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(started.isError, undefined);
+		assert.ok(started.details?.asyncId);
+		const asyncDir = started.details?.asyncDir;
+		assert.ok(asyncDir);
+		const resultPath = path.join(DIRS.results, `${started.details!.asyncId}.json`);
+		let persisted: { state?: string; timedOut?: boolean } = {};
+		for (let attempt = 0; attempt < 150; attempt++) {
+			if (fs.existsSync(resultPath)) persisted = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+			if (persisted.state === "failed") break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(persisted.state, "failed");
+		assert.equal(persisted.timedOut, true);
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatus;
+		assert.equal(status.state, "failed");
+		assert.equal(status.timedOut, true);
+		assert.equal(status.steps?.[0]?.status, "failed");
+		assert.equal(status.steps?.[0]?.timedOut, true);
+		fs.rmSync(asyncDir, { recursive: true, force: true });
+		fs.rmSync(resultPath, { force: true });
+	});
+
+	it("keeps an explicit detached workflow child alive beyond the parent deadline", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "detached child", keepAliveAfterFinalMessageMs: 1_000 });
+		mockPi.onCall({ delay: 10_000 });
+		const executor = makeExecutor([makeAgent("echo")]);
+		const started = await executor.execute(
+			`workflow-detached-deadline-${Date.now()}`,
+			{
+				async: true,
+				timeoutMs: 200,
+				workflowScript: `
+					const detached = runs.run("detached", { agent: "echo", task: "Outlive the workflow", async: true });
+					await runs.run("awaited", { agent: "echo", task: "Wait for the workflow deadline" });
+					return detached;
+				`,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(started.isError, undefined);
+		assert.ok(started.details?.asyncId);
+		assert.ok(started.details?.asyncDir);
+		const workflowResultPath = path.join(DIRS.results, `${started.details!.asyncId}.json`);
+		const workflowStatusPath = path.join(started.details!.asyncDir!, "status.json");
+		let workflowStatus: AsyncStatus = {} as AsyncStatus;
+		let detachedRunId: string | undefined;
+		for (let attempt = 0; attempt < 200; attempt++) {
+			if (fs.existsSync(workflowStatusPath)) workflowStatus = JSON.parse(fs.readFileSync(workflowStatusPath, "utf-8")) as AsyncStatus;
+			detachedRunId = workflowStatus.workflow?.trace?.find((entry) => entry.key === "detached" && entry.runId)?.runId;
+			if (workflowStatus.timedOut === true && detachedRunId) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(workflowStatus.state, "failed");
+		assert.equal(workflowStatus.timedOut, true);
+		assert.ok(detachedRunId);
+
+		const detachedDir = path.join(DIRS.async, detachedRunId);
+		const detachedStatusPath = path.join(detachedDir, "status.json");
+		let detachedStatus: AsyncStatus = {} as AsyncStatus;
+		for (let attempt = 0; attempt < 100; attempt++) {
+			if (fs.existsSync(detachedStatusPath)) detachedStatus = JSON.parse(fs.readFileSync(detachedStatusPath, "utf-8")) as AsyncStatus;
+			if (detachedStatus.state === "running") break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(detachedStatus.state, "running");
+		assert.equal(detachedStatus.deadlineAt, undefined);
+
+		const inspected = await executor.execute(
+			"inspect-detached-after-workflow-timeout",
+			{ action: "status", id: detachedRunId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(inspected.isError, undefined);
+		assert.match(inspected.content[0]?.text ?? "", /running/i);
+
+		for (let attempt = 0; attempt < 100 && detachedStatus.state === "running"; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			if (fs.existsSync(detachedStatusPath)) detachedStatus = JSON.parse(fs.readFileSync(detachedStatusPath, "utf-8")) as AsyncStatus;
+		}
+		fs.rmSync(started.details.asyncDir!, { recursive: true, force: true });
+		fs.rmSync(workflowResultPath, { force: true });
+		fs.rmSync(detachedDir, { recursive: true, force: true });
+		fs.rmSync(path.join(DIRS.results, `${detachedRunId}.json`), { force: true });
+	});
+
+	it("keeps a retained detached resume alive beyond the parent timeout with its own timeout", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ delay: 10_000 });
+		mockPi.onCall({ delay: 10_000 });
+		const sourceRunId = `retained-detached-source-${Date.now()}`;
+		const sourceAsyncDir = path.join(DIRS.async, sourceRunId);
+		const sessionFile = path.join(tempDir, "retained-detached-session.jsonl");
+		fs.mkdirSync(sourceAsyncDir, { recursive: true });
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		fs.writeFileSync(path.join(sourceAsyncDir, "status.json"), JSON.stringify({
+			runId: sourceRunId,
+			sessionId: "session-123",
+			mode: "single",
+			state: "complete",
+			startedAt: 100,
+			lastUpdate: 200,
+			cwd: tempDir,
+			sessionFile,
+			steps: [{ agent: "echo", status: "complete", sessionFile }],
+		}, null, 2), "utf-8");
+		const executor = makeExecutor([makeAgent("echo")]);
+		let detachedRunId: string | undefined;
+		try {
+			const started = await executor.execute(
+			`workflow-retained-detached-${Date.now()}`,
+			{
+				async: true,
+				timeoutMs: 200,
+				workflowScript: `
+					const detached = runs.run("detached-resume", { resume: "${sourceRunId}", task: "Continue after the parent timeout", async: true, timeoutMs: 5_000 });
+					await runs.run("awaited", { agent: "echo", task: "Wait for the parent timeout" });
+					return detached;
+				`,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(started.isError, undefined, started.content[0]?.text);
+			assert.ok(started.details?.asyncId);
+			assert.ok(started.details?.asyncDir);
+			const workflowResultPath = path.join(DIRS.results, `${started.details!.asyncId}.json`);
+			const workflowStatusPath = path.join(started.details!.asyncDir!, "status.json");
+			let workflowStatus: AsyncStatus = {} as AsyncStatus;
+			for (let attempt = 0; attempt < 200; attempt++) {
+				if (fs.existsSync(workflowStatusPath)) workflowStatus = JSON.parse(fs.readFileSync(workflowStatusPath, "utf-8")) as AsyncStatus;
+				detachedRunId = workflowStatus.workflow?.trace?.find((entry) => entry.key === "detached-resume" && entry.runId)?.runId;
+				if (workflowStatus.timedOut === true && detachedRunId) break;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			assert.equal(workflowStatus.state, "failed");
+			assert.equal(workflowStatus.timedOut, true);
+			assert.ok(detachedRunId);
+
+			const detachedDir = path.join(DIRS.async, detachedRunId);
+			const detachedStatusPath = path.join(detachedDir, "status.json");
+			let detachedStatus: AsyncStatus = {} as AsyncStatus;
+			for (let attempt = 0; attempt < 100; attempt++) {
+				if (fs.existsSync(detachedStatusPath)) detachedStatus = JSON.parse(fs.readFileSync(detachedStatusPath, "utf-8")) as AsyncStatus;
+				if (detachedStatus.state === "running") break;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			assert.equal(detachedStatus.state, "running");
+			assert.ok((detachedStatus.timeoutMs ?? 0) > 0 && (detachedStatus.timeoutMs ?? Number.POSITIVE_INFINITY) <= 5_000);
+			assert.ok((detachedStatus.deadlineAt ?? 0) > (workflowStatus.deadlineAt ?? Number.POSITIVE_INFINITY));
+
+			const inspected = await executor.execute(
+			"inspect-retained-detached-after-timeout",
+			{ action: "status", id: detachedRunId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+			);
+			assert.equal(inspected.isError, undefined);
+			assert.match(inspected.content[0]?.text ?? "", /running/i);
+
+			for (let attempt = 0; attempt < 350; attempt++) {
+				if (fs.existsSync(detachedStatusPath)) detachedStatus = JSON.parse(fs.readFileSync(detachedStatusPath, "utf-8")) as AsyncStatus;
+				if (detachedStatus.timedOut === true || detachedStatus.state === "failed") break;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			assert.equal(detachedStatus.timedOut, true);
+			fs.rmSync(started.details.asyncDir!, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+			fs.rmSync(workflowResultPath, { force: true });
+			fs.rmSync(detachedDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+			fs.rmSync(path.join(DIRS.results, `${detachedRunId}.json`), { force: true });
+		} finally {
+			fs.rmSync(sourceAsyncDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+			if (detachedRunId) {
+				fs.rmSync(path.join(DIRS.async, detachedRunId), { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+				fs.rmSync(path.join(DIRS.results, `${detachedRunId}.json`), { force: true });
+			}
+		}
 	});
 
 	it("projects live child activity into async workflow status", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
@@ -3928,6 +4188,46 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		);
 		assert.equal(explicitResult.isError, true);
 		assert.match(explicitResult.content[0]?.text ?? "", /Workflow script timed out after 150ms/);
+	});
+
+	it("awaits workflow child output without inventing a child timeout", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "workflow child complete" });
+		const result = await makeExecutor().execute(
+			"workflow-child-no-default",
+			{ async: false, workflowScript: `return await runs.run("child", { agent: "echo", task: "Complete the child" });` },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.results?.length, 1);
+		assert.equal(typeof result.details?.deadlineAt, "number");
+		assert.match(result.content[0]?.text ?? "", /workflow child complete/);
+	});
+
+	it("awaits sequential workflow children under one parent deadline", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "first child" });
+		mockPi.onCall({ output: "second child" });
+		const result = await makeExecutor().execute(
+			"workflow-child-deadline",
+			{
+				async: false,
+				timeoutMs: 2_000,
+				workflowScript: `
+					await runs.run("first", { agent: "echo", task: "First child" });
+					return await runs.run("second", { agent: "echo", task: "Second child" });
+				`,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.results?.length, 2);
+		assert.equal(typeof result.details?.deadlineAt, "number");
+		assert.match(result.content[0]?.text ?? "", /second child/);
 	});
 
 	it("runs omitted async launches in the background when the global default is enabled", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

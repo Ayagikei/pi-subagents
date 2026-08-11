@@ -60,6 +60,27 @@ describe("scripted workflow runtime", () => {
 		assert.equal(result.value, "done");
 	});
 
+	it("marks workflow timeout errors and aborts awaited child launches", async () => {
+		let aborted = false;
+		await assert.rejects(
+			runWorkflowScript({
+				script: `await runs.run("slow", { agent: "worker", task: "wait" });`,
+				timeoutMs: 200,
+				launch(_key, _params, signal) {
+					return new Promise((_resolve, reject) => {
+						signal.addEventListener("abort", () => {
+							aborted = true;
+							reject(new Error("aborted"));
+						}, { once: true });
+					});
+				},
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			}),
+			(error: unknown) => error instanceof WorkflowScriptError && error.timedOut,
+		);
+		assert.equal(aborted, true);
+	});
+
 	it("exposes validated state only when a mission state adapter is present", async () => {
 		const values = new Map<string, unknown>();
 		const withState = await runWorkflowScript({
