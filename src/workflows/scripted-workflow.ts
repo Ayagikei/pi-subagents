@@ -351,17 +351,21 @@ export interface WorkflowScriptResult {
 
 export class WorkflowScriptError extends Error {
 	readonly partial: Omit<WorkflowScriptResult, "value">;
+	readonly timedOut: boolean;
 
-	constructor(message: string, partial: Omit<WorkflowScriptResult, "value">) {
+	constructor(message: string, partial: Omit<WorkflowScriptResult, "value">, timedOut = false) {
 		super(message);
 		this.name = "WorkflowScriptError";
 		this.partial = partial;
+		this.timedOut = timedOut;
 	}
 }
 
 export interface RunWorkflowScriptOptions {
 	script: string;
 	timeoutMs?: number;
+	/** Absolute workflow deadline, shared with awaited child launches. */
+	deadlineAt?: number;
 	signal?: AbortSignal;
 	launch: (key: string, params: Record<string, unknown>, signal: AbortSignal) => Promise<WorkflowScriptChildResult>;
 	status: (keyOrRunId: string, signal: AbortSignal) => Promise<WorkflowScriptChildResult>;
@@ -374,6 +378,7 @@ export interface RunWorkflowScriptOptions {
 	};
 	onTrace?: (trace: WorkflowScriptTraceEntry[]) => void;
 	onEmit?: (emits: unknown[]) => void;
+	onTimeout?: () => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -482,6 +487,7 @@ function workflowStringMetadata(params: Record<string, unknown>): Pick<WorkflowS
 export async function runWorkflowScript(options: RunWorkflowScriptOptions): Promise<WorkflowScriptResult> {
 	if (!options.script.trim()) throw new Error("workflowScript must not be empty.");
 	if (options.timeoutMs !== undefined && (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1)) throw new Error("workflow script timeout must be a positive integer.");
+	if (options.deadlineAt !== undefined && (!Number.isFinite(options.deadlineAt) || !Number.isInteger(options.deadlineAt))) throw new Error("workflow script deadline must be a finite integer.");
 
 	const worker = new Worker(WORKER_SOURCE, { eval: true });
 	const emits: unknown[] = [];
@@ -501,7 +507,7 @@ export async function runWorkflowScript(options: RunWorkflowScriptOptions): Prom
 	const traceChanged = () => options.onTrace?.([...trace]);
 
 	return await new Promise<WorkflowScriptResult>((resolve, reject) => {
-		const finish = (outcome: { value: unknown } | { error: Error }) => {
+		const finish = (outcome: { value: unknown } | { error: Error; timedOut?: boolean }) => {
 			if (settled) return;
 			settled = true;
 			if (timer) clearTimeout(timer);
@@ -512,14 +518,22 @@ export async function runWorkflowScript(options: RunWorkflowScriptOptions): Prom
 				? new Error(`workflowScript completed with unawaited runs.run launch(es): ${unobservedKeys.map((key) => `'${key}'`).join(", ")}. Await or return each launch.`)
 				: undefined;
 			childController.abort("error" in outcome ? outcome.error : completionError ?? new Error("Workflow script completed."));
-			if ("error" in outcome) reject(new WorkflowScriptError(outcome.error.message, partial()));
+			if ("error" in outcome) reject(new WorkflowScriptError(outcome.error.message, partial(), outcome.timedOut === true));
 			else if (completionError) reject(new WorkflowScriptError(completionError.message, partial()));
 			else resolve({ value: outcome.value, ...partial() });
 		};
 		const onAbort = () => finish({ error: new Error("Workflow script aborted.") });
-		const timer = options.timeoutMs === undefined
+		const deadlineAt = options.deadlineAt ?? (options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs);
+		const remainingTimeoutMs = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now());
+		const timer = remainingTimeoutMs === undefined
 			? undefined
-			: setTimeout(() => finish({ error: new Error(`Workflow script timed out after ${options.timeoutMs}ms.`) }), options.timeoutMs);
+			: setTimeout(() => {
+				options.onTimeout?.();
+				finish({
+					error: new Error(`Workflow script timed out after ${options.timeoutMs ?? remainingTimeoutMs}ms.`),
+					timedOut: true,
+				});
+			}, remainingTimeoutMs);
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 		if (options.signal?.aborted) return onAbort();
 

@@ -164,6 +164,7 @@ interface AsyncChainParams {
 	nestedRoute?: NestedRouteInfo;
 	acceptance?: AcceptanceInput;
 	timeoutMs?: number;
+	absoluteDeadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
 	usageBudget?: UsageBudgetConfig;
@@ -1011,7 +1012,18 @@ export function executeAsyncChain(
 		return formatAsyncStartError(resultMode, built.error);
 	}
 	const { steps, runnerCwd, workflowGraph, eventChain } = built;
-	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
+	const deadlineAt = params.absoluteDeadlineAt ?? (params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined);
+	const timeoutMs = deadlineAt !== undefined && params.absoluteDeadlineAt !== undefined
+		? Math.max(0, deadlineAt - Date.now())
+		: params.timeoutMs;
+	if (timeoutMs !== undefined && timeoutMs <= 0 && params.absoluteDeadlineAt !== undefined) {
+		try {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		} catch {
+			// Best-effort cleanup for a launch rejected at its parent deadline.
+		}
+		return formatAsyncStartError(resultMode, "The source run's absolute deadline expired before recovery could launch.");
+	}
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	const initialUsageBudget = usageBudgetState(params.usageBudget, undefined);
 	let childTargetIndex = 0;
@@ -1060,7 +1072,7 @@ export function executeAsyncChain(
 				childIntercomTargets,
 				resultMode,
 				dynamicFanoutMaxItems: params.dynamicFanoutMaxItems,
-				timeoutMs: params.timeoutMs,
+				timeoutMs,
 				deadlineAt,
 				globalConcurrencyLimit: params.globalConcurrencyLimit,
 				workflowGraph,
@@ -1147,7 +1159,7 @@ export function executeAsyncChain(
 						agents: flatAgents,
 						chainStepCount: eventChain.length,
 						parallelGroups,
-						...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
+						...(timeoutMs !== undefined ? { timeoutMs, deadlineAt } : {}),
 						...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
 						startedAt: now,
 						lastUpdate: now,
@@ -1176,7 +1188,7 @@ export function executeAsyncChain(
 			workflowGraph,
 			cwd: runnerCwd,
 			asyncDir,
-			...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
+			...(timeoutMs !== undefined ? { timeoutMs, deadlineAt } : {}),
 			...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
 			...(initialUsageBudget ? { usageBudget: initialUsageBudget } : {}),
 			...(capabilityCeiling ? { capabilityCeiling } : {}),
@@ -1194,7 +1206,7 @@ export function executeAsyncChain(
 
 	return {
 		content: [{ type: "text", text: formatAsyncStartedMessage(`Async ${resultMode}: ${chainDesc} [${id}]`, ctx.interactive === true) }],
-		details: { mode: resultMode, runId: id, results: [], asyncId: id, asyncDir, workflowGraph, ...(capabilityCeiling ? { capabilityCeiling } : {}), ...(params.parentWorkflowRunId ? { parentWorkflowRunId: params.parentWorkflowRunId } : {}), ...(params.workflowKey ? { workflowKey: params.workflowKey } : {}), ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}), ...(initialUsageBudget ? { usageBudget: initialUsageBudget } : {}) },
+		details: { mode: resultMode, runId: id, results: [], asyncId: id, asyncDir, workflowGraph, ...(capabilityCeiling ? { capabilityCeiling } : {}), ...(params.parentWorkflowRunId ? { parentWorkflowRunId: params.parentWorkflowRunId } : {}), ...(params.workflowKey ? { workflowKey: params.workflowKey } : {}), ...(timeoutMs !== undefined ? { timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}), ...(initialUsageBudget ? { usageBudget: initialUsageBudget } : {}) },
 	};
 }
 
@@ -1318,7 +1330,7 @@ export function executeAsyncSingle(
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
 	const deadlineAt = params.absoluteDeadlineAt ?? (params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined);
 	const timeoutMs = params.absoluteDeadlineAt !== undefined && deadlineAt !== undefined
-		? deadlineAt - Date.now()
+		? Math.max(0, deadlineAt - Date.now())
 		: params.timeoutMs;
 	if (timeoutMs !== undefined && timeoutMs <= 0) return formatAsyncStartError("single", "The source run's absolute deadline expired before recovery could launch.");
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
