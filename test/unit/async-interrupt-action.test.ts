@@ -400,10 +400,19 @@ describe("async interrupt action", () => {
 		}
 	});
 
-	it("rejects workflow interrupt instead of signaling a shared host pid", async () => {
+	it("interrupts the active child of a live workflow without signaling its shared host pid", async () => {
 		const state = createState();
 		const runId = `interrupt-workflow-host-${Date.now().toString(36)}`;
 		const asyncDir = createRunningAsync(state, runId, { track: false, mode: "workflow", pid: process.pid });
+		let interrupted = 0;
+		state.foregroundControls.set("child-run", {
+			runId: "child-run",
+			parentWorkflowRunId: runId,
+			mode: "single",
+			startedAt: 100,
+			updatedAt: 100,
+			activeChildren: new Map([[0, { index: 0, agent: "reviewer", startedAt: 100, updatedAt: 100, interrupt: () => { interrupted += 1; return true; } }]]),
+		});
 		try {
 			const kills: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = [];
 			const result = await executorWithKill(state, (pid, signal) => {
@@ -411,8 +420,9 @@ describe("async interrupt action", () => {
 				return true;
 			}).execute("interrupt", { action: "interrupt", id: runId }, new AbortController().signal, undefined, ctx());
 
-			assert.equal(result.isError, true);
-			assert.match(text(result), new RegExp(`Interrupt is unsupported for async workflow ${runId}; use stop instead\\.`));
+			assert.equal(result.isError, undefined);
+			assert.match(text(result), new RegExp(`Interrupted 1 active child of async workflow ${runId}`));
+			assert.equal(interrupted, 1);
 			assert.equal(fs.existsSync(path.join(asyncDir, "control", "interrupt.json")), false);
 			assert.deepEqual(kills, [{ pid: process.pid, signal: 0 }]);
 		} finally {

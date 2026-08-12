@@ -37,6 +37,7 @@ For broad or uncertain requests, read more than one reference. For complex work,
 - Use async/background by default when work can proceed independently; do not poll just to wait. For adaptive gates, branch in `workflowScript`. Approval controls remain available only for already-running durable legacy chains.
 - Preserve capability ceilings, including child tool restrictions and session-scoped allowed-agent restrictions.
 - Escalate unresolved product, architecture, authority, release, merge, or safety decisions upward instead of letting a child decide silently.
+- For deployment routes where `worker`/`doer` uses a fast DS4F model, treat a hard blocker or low-confidence result as an escalation signal: the parent should hand off a compact evidence brief to a Luna-medium worker, then to a Sol-medium planner if Luna cannot resolve it. The child reports through supervisor; it does not spawn the next child itself.
 - Treat receipts, CI, review bots, and external-run records as evidence, not authority to merge, close, comment, publish, or release.
 - As a conservative orchestration policy, do not pass `turnBudget`, a hard `toolBudget`, or a tight `usageBudget` to mutation-capable workers. The default tool budget blocks read/search tools rather than mutation tools, and reported usage has no reservation model. If a worker is interrupted after a tool call starts, checkpoint after the current tool returns with changed files, build/test state, and commit or PR state.
 

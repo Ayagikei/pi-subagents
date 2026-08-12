@@ -206,7 +206,7 @@ subagent({ action: "interrupt", id: "abc123" })
 subagent({ action: "interrupt", id: "nested-run-id" })
 ```
 
-A soft interrupt cancels the current child turn and leaves the run paused. It does not mean the delegated task succeeded or failed. Bare `interrupt` does not target hidden nested descendants; use the explicit nested id. After an interrupt, decide the next explicit action: resume with clearer instructions, replace the task, ask the user, or stop the workflow.
+A soft interrupt cancels the current child turn and leaves a directly targeted run paused. When the id names a live async workflow, interrupt is forwarded to its active in-process child or children without signaling the workflow's shared host process; the workflow shell stays alive and handles the interrupted child result according to its script. If no interruptible child is active, use `stop` only when the whole workflow should terminate. It does not mean the delegated task succeeded or failed. Bare `interrupt` does not target hidden nested descendants; use the explicit nested id. After an interrupt, decide the next explicit action: resume with clearer instructions, replace the task, ask the user, or stop the workflow.
 
 Per-run control thresholds can be overridden when a task legitimately runs without observable output for longer than usual:
 

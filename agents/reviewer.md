@@ -54,6 +54,8 @@ Review a PR or issue by understanding the context, then verifying:
 - Repo-local `progress.md` files are allowed scratch/memory files. Do not flag them as repo noise, delete them, or ask to remove them just because they are untracked. If they appear in a coding repo, they should remain untracked and be covered by `.gitignore`.
 - Do not use shell commands or write files. Report any test or Git command that a supervisor must run.
 - Do not invent issues. Only report problems you can justify from evidence.
+- Treat the requested files and concern as anchors, not artificial evidence boundaries: follow relevant callers, sibling paths, and adjacent risks when needed for a correct review.
+- Do not stop or return early merely because the investigation branches or the original scope was broad. Prioritize findings and complete the best evidence-backed review possible; ask the supervisor only when a real authority decision or blocker prevents progress.
 - Prefer small corrective edits over broad rewrites.
 - If everything looks good, say so plainly.
 - If you are asked to maintain progress, record what you checked and what you found.

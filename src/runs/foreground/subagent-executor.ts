@@ -914,6 +914,25 @@ function emitControlNotification(input: {
 	}
 }
 
+function interruptWorkflowChildren(state: SubagentState, workflowRunId: string): number {
+	let interrupted = 0;
+	for (const control of state.foregroundControls.values()) {
+		if (control.parentWorkflowRunId !== workflowRunId) continue;
+		const children = [...(control.activeChildren?.values() ?? [])];
+		const interrupts = children.length > 0
+			? children.map((child) => child.interrupt)
+			: [control.interrupt];
+		const before = interrupted;
+		for (const interrupt of interrupts) {
+			if (interrupt?.()) interrupted += 1;
+		}
+		if (interrupted === before) continue;
+		delete control.currentActivityState;
+		control.updatedAt = Date.now();
+	}
+	return interrupted;
+}
+
 function interruptAsyncRun(
 	state: SubagentState,
 	runId: string | undefined,
@@ -939,8 +958,15 @@ function interruptAsyncRun(
 		};
 	}
 	if (status.mode === "workflow") {
+		const interrupted = interruptWorkflowChildren(state, target.asyncId);
+		if (interrupted > 0) {
+			return {
+				content: [{ type: "text", text: `Interrupted ${interrupted} active ${interrupted === 1 ? "child" : "children"} of async workflow ${target.asyncId}.` }],
+				details: { mode: "management", results: [] },
+			};
+		}
 		return {
-			content: [{ type: "text", text: `Interrupt is unsupported for async workflow ${target.asyncId}; use stop instead.` }],
+			content: [{ type: "text", text: `No active interruptible child was found for async workflow ${target.asyncId}; use stop to terminate the workflow.` }],
 			isError: true,
 			details: { mode: "management", results: [] },
 		};
