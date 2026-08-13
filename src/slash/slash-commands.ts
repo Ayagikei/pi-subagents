@@ -855,7 +855,7 @@ export function registerSlashCommands(
 	});
 
 	pi.registerCommand("subagents-load-profile", {
-		description: "Load a subagent profile into ~/.pi/agent/settings.json",
+		description: "Choose or load a subagent profile into ~/.pi/agent/settings.json",
 		getArgumentCompletions: (prefix) => {
 			if (prefix.includes(" ")) return null;
 			return listSubagentProfiles()
@@ -863,7 +863,17 @@ export function registerSlashCommands(
 				.map((name) => ({ value: name, label: name }));
 		},
 		handler: async (args, ctx) => {
-			const parsed = parseSingleRequiredArg(args, "Usage: /subagents-load-profile <name>");
+			let name = args.trim();
+			if (!name) {
+				const profiles = listSubagentProfiles();
+				if (profiles.length === 0) {
+					ctx.ui.notify("No subagent profiles found in ~/.pi/agent/profiles/pi-subagents/", "error");
+					return;
+				}
+				name = await ctx.ui.select("Load subagent profile", profiles) ?? "";
+				if (!name) return;
+			}
+			const parsed = parseSingleRequiredArg(name, "Usage: /subagents-load-profile [name]");
 			if (parsed.ok === false) {
 				ctx.ui.notify(parsed.message, "error");
 				return;

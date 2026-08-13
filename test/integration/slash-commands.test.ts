@@ -784,6 +784,41 @@ Inspect
 		});
 	});
 
+	it("/subagents-load-profile opens a profile selector when no name is provided", async () => {
+		await withIsolatedHome(async () => {
+			const profilesDir = path.join(process.env.PI_CODING_AGENT_DIR!, "profiles", "pi-subagents");
+			fs.mkdirSync(profilesDir, { recursive: true });
+			fs.writeFileSync(path.join(profilesDir, "deepseek-flash-off.json"), JSON.stringify({
+				subagents: { agentOverrides: { worker: { fallbackModels: false } } },
+			}));
+
+			const commands = new Map<string, RegisteredSlashCommand>();
+			const selections: Array<{ title: string; choices: string[] }> = [];
+			registerSlashCommands!({
+				events: createEventBus(),
+				registerCommand(name: string, spec: RegisteredSlashCommand) { commands.set(name, spec); },
+				registerShortcut() {},
+				sendMessage() {},
+			} as never, createState(process.cwd()));
+
+			await commands.get("subagents-load-profile")!.handler("", createCommandContext({
+				hasUI: true,
+				select: async (title, choices) => {
+					selections.push({ title, choices });
+					return "deepseek-flash-off";
+				},
+			}));
+
+			assert.deepEqual(selections, [{ title: "Load subagent profile", choices: ["deepseek-flash-off"] }]);
+			const settings = JSON.parse(fs.readFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"), "utf-8"));
+			assert.equal(settings.subagents.agentOverrides.worker.fallbackModels, false);
+
+			await commands.get("subagents-load-profile")!.handler("deepseek-flash-off", createCommandContext({
+				select: async () => { throw new Error("named profile should not open selector"); },
+			}));
+		});
+	});
+
 	it("does not register legacy orchestration commands", async () => {
 		const commands = new Map<string, unknown>();
 		registerSlashCommands!({
