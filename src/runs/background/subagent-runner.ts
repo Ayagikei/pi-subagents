@@ -88,7 +88,13 @@ import { markProcessTerminalCandidateLeaseRelease, writeProcessTerminalCandidate
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, terminalSteeringNoticeState, updateSteeringTarget } from "./steering.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, getFinalOutput, hasEmptyTerminalAssistantResponse, readStatus } from "../../shared/utils.ts";
-import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
+import { CURSOR_MUTATION_UNAVAILABLE_MESSAGE, evaluateCompletionMutationGuard, fileMutationEffectStatus } from "../shared/completion-guard.ts";
+import {
+	appendCursorActivityOutputLines,
+	applyCursorActivityRecords,
+	createCursorActivityLogTailer,
+	resolveChildCursorActivityLogPath,
+} from "../shared/cursor-activity-log.ts";
 import {
 	createMutatingFailureState,
 	didMutatingToolFail,
@@ -1367,6 +1373,11 @@ async function runSingleStep(
 				: undefined,
 			childWatchdog,
 			waitToolEnabled: step.waitToolEnabled,
+			cursorActivityLogPath: resolveChildCursorActivityLogPath({
+				sessionFile: step.sessionFile,
+				fallbackDir: path.dirname(ctx.outputFile),
+				index: ctx.flatIndex,
+			}),
 		}));
 		if (step.definitionDigest) {
 			const toolPlan = resolvePiLaunchToolPlan(omitUndefinedProperties({
@@ -1498,15 +1509,26 @@ async function runSingleStep(
 				messages: run.messages,
 				tools: step.tools,
 				mcpDirectTools: step.mcpDirectTools,
+				model: run.model,
+				activityLogPath: resolveChildCursorActivityLogPath({
+					sessionFile: step.sessionFile,
+					fallbackDir: path.dirname(ctx.outputFile),
+					index: ctx.flatIndex,
+				}),
 			}))
 			: undefined;
 		const completionGuardTriggered = completionGuard?.triggered === true && !run.observedMutationAttempt;
 		const fileMutationEffect = completionGuard
 			? {
-				status: completionGuard.expectedMutation ? completionGuardTriggered ? "missing" as const : "observed" as const : "not-applicable" as const,
+				status: fileMutationEffectStatus({
+					expectedMutation: completionGuard.expectedMutation,
+					triggered: completionGuardTriggered,
+					evidence: completionGuard.evidence,
+				}),
 				expected: completionGuard.expectedMutation,
 				attempted: completionGuard.attemptedMutation || run.observedMutationAttempt === true,
 				...(completionGuardTriggered ? { message: "Subagent completed without making edits for an implementation task." } : {}),
+				...(completionGuard.evidence === "unavailable" ? { message: CURSOR_MUTATION_UNAVAILABLE_MESSAGE } : {}),
 			}
 			: undefined;
 		const completionGuardError = completionGuardTriggered && !isAgentContractV1(step.agentContract)
@@ -2024,6 +2046,7 @@ async function runSubagent(
 	let interrupted = false;
 	let currentActivityState: ActivityState | undefined;
 	let activityTimer: NodeJS.Timeout | undefined;
+	let cursorActivityTimer: NodeJS.Timeout | undefined;
 	let timeoutTimer: NodeJS.Timeout | undefined;
 	let timedOut = false;
 	let stopped = false;
@@ -2508,6 +2531,7 @@ async function runSubagent(
 	const pendingToolResults: Array<{ tool: string; path?: string; mutates: boolean; startedAt?: number } | undefined> = initialStatusSteps.map(() => undefined);
 	const supervisorAttentionSteps = new Map<number, ActivityState | undefined>();
 	const mutatingFailureWindowMs = 5 * 60_000;
+	const cursorActivityTailers = new Map<number, ReturnType<typeof createCursorActivityLogTailer>>();
 	const appendControlEvent = (event: ReturnType<typeof buildControlEvent>) => {
 		if (!controlConfig.enabled) return;
 		const childIntercomTarget = config.childIntercomTargets?.[event.index ?? statusPayload.currentStep];
@@ -2536,6 +2560,48 @@ async function runSubagent(
 		setOptionalProperty(statusPayload, "currentTool", activeStep?.currentTool);
 		setOptionalProperty(statusPayload, "currentToolStartedAt", activeStep?.currentToolStartedAt);
 		setOptionalProperty(statusPayload, "currentPath", activeStep?.currentPath);
+	};
+	const consumeCursorActivityForStep = (index: number, now: number): boolean => {
+		const step = statusPayload.steps[index];
+		if (!step) return false;
+		const running = step.status === "running";
+		if (!running && !cursorActivityTailers.has(index)) return false;
+		const logPath = resolveChildCursorActivityLogPath({
+			sessionFile: step.sessionFile,
+			fallbackDir: asyncDir,
+			index,
+		});
+		let tailer = cursorActivityTailers.get(index);
+		if (!tailer || tailer.path !== logPath) {
+			tailer = createCursorActivityLogTailer(logPath);
+			cursorActivityTailers.set(index, tailer);
+		}
+		const records = tailer.consume();
+		if (!running) cursorActivityTailers.delete(index);
+		if (records.length === 0) return false;
+		const applied = applyCursorActivityRecords({
+			records,
+			recentTools: step.recentTools ?? [],
+			currentTool: step.currentTool,
+			currentToolArgs: step.currentToolArgs,
+			currentToolStartedAt: step.currentToolStartedAt,
+			lastActivityAt: step.lastActivityAt ?? now,
+			now,
+			countedIdentities: tailer.countedIdentities,
+		});
+		step.recentTools = applied.recentTools;
+		setOptionalProperty(step, "currentTool", applied.currentTool);
+		setOptionalProperty(step, "currentToolArgs", applied.currentToolArgs);
+		setOptionalProperty(step, "currentToolStartedAt", applied.currentToolStartedAt);
+		step.lastActivityAt = applied.lastActivityAt;
+		if (applied.addedToolCount > 0) {
+			step.toolCount = (step.toolCount ?? 0) + applied.addedToolCount;
+			statusPayload.toolCount = (statusPayload.toolCount ?? 0) + applied.addedToolCount;
+		}
+		statusPayload.lastActivityAt = Math.max(statusPayload.lastActivityAt ?? now, applied.lastActivityAt);
+		appendCursorActivityOutputLines(path.join(asyncDir, `output-${index}.log`), records);
+		syncTopLevelCurrentTool();
+		return true;
 	};
 	const syncAggregateActivityState = (): void => {
 		const nextRunState = statusPayload.steps.some((step) => step.activityState === "needs_attention")
@@ -3003,6 +3069,19 @@ async function runSubagent(
 		}, 1000);
 		activityTimer.unref?.();
 	}
+	cursorActivityTimer = setInterval(() => {
+		if (statusPayload.state !== "running") return;
+		const now = Date.now();
+		let changed = false;
+		for (let index = 0; index < statusPayload.steps.length; index++) {
+			changed = consumeCursorActivityForStep(index, now) || changed;
+		}
+		if (changed) {
+			statusPayload.lastUpdate = now;
+			writeStatusPayload(false);
+		}
+	}, 1000);
+	cursorActivityTimer.unref?.();
 
 	const interruptRunner = () => {
 		consumeInterruptRequest(asyncDir);
@@ -4433,6 +4512,10 @@ async function runSubagent(
 	if (activityTimer) {
 		clearInterval(activityTimer);
 		activityTimer = undefined;
+	}
+	if (cursorActivityTimer) {
+		clearInterval(cursorActivityTimer);
+		cursorActivityTimer = undefined;
 	}
 	if (timeoutTimer) {
 		clearTimeout(timeoutTimer);

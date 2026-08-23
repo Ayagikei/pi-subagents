@@ -1,49 +1,41 @@
 ---
 name: pi-subagents
-description: |
-  Delegate work to builtin or custom subagents with single-agent, parallel,
-  scripted, compatibility-chain, async, forked-context, and coordinated workflows. Use
-  for advisory review, implementation handoffs, and multi-step tasks where a
-  single agent should stay in control while other agents contribute context,
-  planning, or execution.
+description: Delegate work to builtin or custom Pi subagents through single-child, parallel, scripted, async, forked-context, scheduled, mission-backed, and coordinated workflows. Use when one parent should remain in control while specialized agents explore, plan, implement, review, or validate.
 ---
 
 # Pi Subagents
 
-This skill is for the main parent orchestrator only. Do not inject or follow it inside spawned child subagents. The parent session owns delegation, orchestration, review fanout, and final fix-worker launches. Ordinary children should not run their own subagent workflows; the explicit exception is a delegated fanout child whose resolved builtin `tools` includes `subagent`, and that child may use `subagent` only for the fanout work the parent assigned.
+This skill is for the parent orchestrator only. Do not inject it into ordinary children or let them orchestrate. A delegated fanout child may use `subagent` only when its resolved tools include it and only for the assigned fanout.
 
-Use this skill when the parent orchestrator needs one specialized child or composed orchestration. Use `workflowScript` for all execution, including one isolated child. Use `return runs.run("main", { agent, task })` for one child and `runs.all([...])` for coordinated waves: sequence, parallelism, branching, retries, gate monitors, and aggregation. Scripted workflows start asynchronously by default; pass `async:false` only for a small foreground run.
+Use `workflowScript` for every execution. For one child, use `return runs.run("main", { agent, task })`; for coordinated work, use `runs.all([...])` or ordinary JavaScript for sequence, branching, retries, gates, and aggregation. Workflows start asynchronously by default; use `async:false` only for small foreground work.
 
-## How to use this router
+## Progressive Disclosure
 
-Read the matching reference file before acting. Paths are relative to this `SKILL.md`; resolve them against `skills/pi-subagents/` and load them with the read tool.
+Before acting, use `read` to load only the references needed for the current operation. Resolve paths relative to this skill.
 
-| Task | Read |
+| Need | Reference |
 | --- | --- |
-| Decide whether to delegate, choose agents, compare tool versus slash commands, apply prompt techniques, or understand builtin roles | `references/prompting-and-roles.md` |
-| Run one-child, scripted, async, scheduled, mission-backed, forked, watchdog, oracle, or intercom-coordinated workflows | `references/execution-controls.md` |
-| List/create/update/delete/eject/disable agents or chains, edit agent files, use prompt-template integration, or expose extension RPC | `references/management-authoring-rpc.md` |
-| Check safety constraints, best practices, standard workflows, or error handling | `references/constraints-and-recipes.md` |
+| Delegation decisions, roles, prompting, tool vs slash-command choice | `references/prompting-and-roles.md` |
+| Execution, async, resume/steer/stop, schedules, missions, fork, watchdog, oracle, intercom | `references/execution-controls.md` |
+| Agent/chain management, authoring, prompt templates, extension RPC | `references/management-authoring-rpc.md` |
+| Safety constraints, error handling, and standard recipes | `references/constraints-and-recipes.md` |
 
-For broad or uncertain requests, read more than one reference. For complex work, start with `references/prompting-and-roles.md` and `references/execution-controls.md`, then consult `references/constraints-and-recipes.md` before launching or reviewing child work.
+For broad workflows, read prompting/roles and execution controls first, then constraints/recipes before launch.
 
-## Always-on constraints
+## Always-On Invariants
 
-- Keep the parent as orchestrator and final decision-maker.
-- Use one writer per cwd/worktree unless isolated worktrees are intentional.
-- For cross-codebase work, record the target repo, explicit `cwd`, authority boundary, and expected output before launch. Do not assume the parent session cwd is the child repo.
-- For parallel fanout, compare child prompts before launch. Do not send clone prompts with only issue numbers, titles, or broad file globs swapped; each child needs a lane-specific task, source seam, prior evidence, and decision that remains distinct without the item number. Launch that fanout as one async `workflowScript` with stable keys and aggregate output unless there is truly only one child.
-- Prefer fresh-context review/validation fanout, then synthesize and apply fixes in the parent.
-- Use async/background by default when work can proceed independently; do not poll just to wait. For adaptive gates, branch in `workflowScript`. Approval controls remain available only for already-running durable legacy chains.
-- Preserve capability ceilings, including child tool restrictions and session-scoped allowed-agent restrictions.
-- Escalate unresolved product, architecture, authority, release, merge, or safety decisions upward instead of letting a child decide silently.
-- For deployment routes where `worker`/`doer` uses a fast DS4F model, treat a hard blocker or low-confidence result as an escalation signal: the parent should hand off a compact evidence brief to a Luna-medium worker, then to a Sol-medium planner if Luna cannot resolve it. The child reports through supervisor; it does not spawn the next child itself.
-- Treat receipts, CI, review bots, and external-run records as evidence, not authority to merge, close, comment, publish, or release.
-- As a conservative orchestration policy, do not pass `turnBudget`, a hard `toolBudget`, or a tight `usageBudget` to mutation-capable workers. The default tool budget blocks read/search tools rather than mutation tools, and reported usage has no reservation model. If a worker is interrupted after a tool call starts, checkpoint after the current tool returns with changed files, build/test state, and commit or PR state.
+- The parent owns orchestration, decisions, integration, and final verification.
+- Keep writes non-conflicting: one writer per overlapping file set. Parallel writers in the same cwd/worktree are allowed when the parent assigns disjoint writable files and the lanes will not collide (no shared generated/lock files, no concurrent git commit/push). Use isolated worktrees when the write sets cannot be partitioned.
+- For cross-repository work, specify the target repo, `cwd`, authority boundary, and output. Never assume the child shares the parent's cwd.
+- Give every child a lane-specific, self-contained task. Parallel prompts must differ in source seam, evidence, scope, and decision—not only issue number or file glob. Launch fanout as one async `workflowScript` with stable keys and aggregate output.
+- Prefer fresh-context review and validation, then synthesize in the parent. Preserve tool restrictions, capability ceilings, and allowed-agent limits.
+- Use background execution when useful and event-driven waiting rather than polling. Escalate product, architecture, authority, release, merge, and safety decisions to the parent.
+- Treat receipts, CI, review bots, and external-run records as evidence, never authority to merge, close, publish, or release.
+- As a conservative orchestration policy, do not pass `turnBudget`, a hard `toolBudget`, or a tight `usageBudget` to mutation-capable workers. The default tool budget blocks read/search tools rather than mutation tools. If interrupted, checkpoint after the current tool returns with changed files, build/test state, and commit or PR state.
 
-## Async and context semantics
+## Async and Context Semantics
 
-- `subagent({ async: true, workflowScript })` backgrounds the workflow. Inside it, omitted/`async: false` `runs.run` and `runs.all` children remain awaited and return their actual output.
-- An awaited workflow child inherits the workflow's one absolute deadline when one exists. It does not invent the standalone 30-minute foreground default when no workflow deadline exists; explicit child or agent limits may only shorten the parent deadline.
-- A child with explicit `async: true` is detached: it does not inherit the workflow deadline, and awaiting its launch returns a detached receipt rather than completion output. Use `status` or `subagent_wait` to supervise it.
-- `context: "fresh"` does not copy the parent transcript. `context: "fork"` copies the persisted parent history and can exceed the model context before the child's first request. Magic Context can compact a child only after it starts; it cannot rescue an oversized initial fork snapshot or enlarge the model window. For a large parent, use a fresh child and a small handoff instead of resuming the oversized child.
+- Outer `subagent({ async:true, workflowScript })` backgrounds the workflow; children without explicit `async:true` remain awaited and return completed output.
+- Awaited children inherit an existing workflow absolute deadline and otherwise receive no invented standalone 30-minute default. Explicit limits may only shorten the deadline.
+- Explicit child `async:true` detaches it, does not inherit the workflow deadline, and returns a launch receipt. Supervise it with status or `subagent_wait`.
+- Fresh context excludes parent transcript. Fork copies the persisted parent history and may overflow before the first request; later compaction cannot repair that initial snapshot. Use fresh context plus a compact handoff for large parents or oversized children.

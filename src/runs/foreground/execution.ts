@@ -4,6 +4,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "../../agents/agents.ts";
@@ -53,7 +54,12 @@ import {
 } from "../../shared/utils.ts";
 import { buildSkillInjection, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { buildAgentMemoryInjection } from "../../agents/agent-memory.ts";
-import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
+import { CURSOR_MUTATION_UNAVAILABLE_MESSAGE, evaluateCompletionMutationGuard, fileMutationEffectStatus } from "../shared/completion-guard.ts";
+import {
+	applyCursorActivityRecords,
+	createCursorActivityLogTailer,
+	resolveChildCursorActivityLogPath,
+} from "../shared/cursor-activity-log.ts";
 import { arbitrateCompletionGuardRescue } from "../shared/llm-intent-arbiter.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
@@ -310,6 +316,11 @@ async function runSingleAttempt(
 	const permissionAuditPath = permissionRules && options.artifactsDir
 		? path.join(options.artifactsDir, "permission-audit", `${options.runId}-${options.index ?? 0}.jsonl`)
 		: undefined;
+	const cursorActivityLogPath = resolveChildCursorActivityLogPath({
+		sessionFile: options.sessionFile,
+		fallbackDir: options.artifactsDir ?? path.join(tmpdir(), "pi-subagents-cursor-activity", options.runId),
+		index: options.index ?? 0,
+	});
 	const { args, env: sharedEnv, tempDir, toolDiagnosticPath, runtimeAcknowledgedExtensionsPath, capabilityAudit } = buildPiArgs({
 		baseArgs: ["--mode", "json", "-p"],
 		task,
@@ -350,6 +361,7 @@ async function runSingleAttempt(
 		childWatchdog,
 		waitToolEnabled: options.waitToolEnabled,
 		capabilityCeiling: options.capabilityCeiling,
+		cursorActivityLogPath,
 	});
 
 	const effectiveSystemPrompt = appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget);
@@ -483,6 +495,33 @@ async function runSingleAttempt(
 		let removeAbortListener: (() => void) | undefined;
 		let removeInterruptListener: (() => void) | undefined;
 		let activityTimer: NodeJS.Timeout | undefined;
+		const cursorActivityTailer = createCursorActivityLogTailer(cursorActivityLogPath);
+		const consumeCursorActivity = (now: number): boolean => {
+			const records = cursorActivityTailer.consume();
+			if (records.length === 0) return false;
+			const applied = applyCursorActivityRecords({
+				records,
+				recentTools: progress.recentTools,
+				currentTool: progress.currentTool,
+				currentToolArgs: progress.currentToolArgs,
+				currentToolStartedAt: progress.currentToolStartedAt,
+				lastActivityAt: progress.lastActivityAt ?? now,
+				now,
+				countedIdentities: cursorActivityTailer.countedIdentities,
+			});
+			progress.recentTools = boundStreamedRecentTools(applied.recentTools);
+			progress.currentTool = applied.currentTool;
+			progress.currentToolArgs = applied.currentToolArgs;
+			progress.currentToolStartedAt = applied.currentToolStartedAt;
+			progress.lastActivityAt = applied.lastActivityAt;
+			if (applied.addedToolCount > 0) {
+				progress.toolCount += applied.addedToolCount;
+			}
+			if (records.some((record) => record.type === "cursor.tool.completed" && record.mutates)) {
+				observedMutationAttempt = true;
+			}
+			return true;
+		};
 		let timeoutTimer: NodeJS.Timeout | undefined;
 		let timeoutTerminationTimer: NodeJS.Timeout | undefined;
 		let timeoutHardKillTimer: NodeJS.Timeout | undefined;
@@ -654,6 +693,7 @@ async function runSingleAttempt(
 		const finish = (code: number) => {
 			if (lifecycleFinished) return;
 			lifecycleFinished = true;
+			consumeCursorActivity(Date.now());
 			clearFinalDrainTimers();
 			clearWatchdogTailTimer();
 			clearStdioGuard();
@@ -995,16 +1035,16 @@ async function runSingleAttempt(
 		};
 
 		fireUpdate();
-		if (controlConfig.enabled || options.onUpdate) {
-			activityTimer = setInterval(() => {
-				if (processClosed || lifecycleFinished) {
-					return;
-				}
-				updateActivityState(Date.now());
-				fireUpdate();
-			}, 1000);
-			activityTimer.unref?.();
-		}
+		activityTimer = setInterval(() => {
+			if (processClosed || lifecycleFinished) {
+				return;
+			}
+			const now = Date.now();
+			const cursorChanged = consumeCursorActivity(now);
+			updateActivityState(now);
+			if (cursorChanged || controlConfig.enabled || options.onUpdate) fireUpdate();
+		}, 1000);
+		activityTimer.unref?.();
 
 		if (attemptTimeout) {
 			timeoutTimer = setTimeout(() => {
@@ -1276,6 +1316,8 @@ async function runSingleAttempt(
 			messages: result.messages ?? [],
 			tools: agent.tools,
 			mcpDirectTools: agent.mcpDirectTools,
+			model: result.model,
+			activityLogPath: cursorActivityLogPath,
 		})
 		: undefined;
 	let completionGuardTriggered = completionGuard?.triggered === true && !observedMutationAttempt;
@@ -1296,19 +1338,20 @@ async function runSingleAttempt(
 		arbiterRescued = arbitration.rescued;
 	}
 	if (completionGuard) {
+		const unavailable = completionGuard.evidence === "unavailable";
 		result.effects = {
 			...(result.effects ?? {}),
 			fileMutation: {
-				status: completionGuard.expectedMutation
-					? completionGuardTriggered
-						? "missing"
-						: arbiterRescued
-							? "not-applicable"
-							: "observed"
-					: "not-applicable",
+				status: fileMutationEffectStatus({
+					expectedMutation: completionGuard.expectedMutation,
+					triggered: completionGuardTriggered,
+					evidence: completionGuard.evidence,
+					arbiterRescued,
+				}),
 				expected: completionGuard.expectedMutation,
 				attempted: completionGuard.attemptedMutation || observedMutationAttempt,
 				...(completionGuardTriggered ? { message: "Subagent completed without making edits for an implementation task." } : {}),
+				...(unavailable ? { message: CURSOR_MUTATION_UNAVAILABLE_MESSAGE } : {}),
 				...(arbiterRescued ? { resolvedBy: "llm-intent-arbiter" } : {}),
 			},
 		};

@@ -248,7 +248,7 @@ More rules:
 - `mcp:` entries are split out and forwarded as direct MCP selections without granting normal builtins unless those builtins are also listed.
 - Path-like `tools` entries, such as extension paths or `.ts`/`.js` files, are treated as tool-extension paths rather than tool names.
 - Internal runtime tools such as `structured_output` are added to an explicit allowlist only when their contract is active.
-- Agents that declare only known read-only builtin tools skip the implementation completion guard. `bash`, unknown tools, and MCP tools stay mutation-capable. Use `completionGuard: false` for bash-enabled validators or advisors that should never be judged as implementation agents.
+- Agents that declare only known read-only builtin tools skip the implementation completion guard. `bash`, unknown tools, and MCP tools stay mutation-capable. Use `completionGuard: false` for bash-enabled validators or advisors that should never be judged as implementation agents. Cursor-backed children (`cursor/...` or a `cursor-sdk-agent-lineage` entry) often mutate files outside the pi transcript. Completed Cursor edit/write/delete rows in the activity sidecar count as observed mutation; when the sidecar and transcript both lack edit/write evidence the guard records `fileMutation.status: unavailable` instead of failing as "no edits". Inspect the worktree.
 
 Examples:
 

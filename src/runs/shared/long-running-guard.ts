@@ -143,7 +143,7 @@ export function isMutatingBashCommand(command: string): boolean {
 
 export function isMutatingTool(toolName: string | undefined, args: Record<string, unknown> | undefined): boolean {
 	if (!toolName) return false;
-	if (toolName === "edit" || toolName === "write") return true;
+	if (toolName === "edit" || toolName === "replace" || toolName === "write") return true;
 	if (toolName === "cursor") {
 		const activityTitle = typeof args?.activityTitle === "string" ? args.activityTitle : "";
 		return /^Cursor (?:edit|write)\b/i.test(activityTitle);

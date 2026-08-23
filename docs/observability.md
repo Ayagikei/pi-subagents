@@ -68,12 +68,13 @@ Async runs write machine-readable lifecycle artifacts for observability and work
   status.json
   events.jsonl
   output-<n>.log
+  cursor-activity-<n>.jsonl
   subagent-log-<id>.md
 ```
 
 - `status.json` powers the widget and `subagent({ action: "status" })` output.
 - `events.jsonl` contains wrapper events plus child Pi JSON events annotated with run and step metadata, including correlated `subagent.steer.requested`, `scheduled`, `routed`, `queued`, `delivered`, `failed`, and `recovered` events plus failure/partial/recovery notices.
-- `output-<n>.log` is a live human-readable tail.
+- `output-<n>.log` is a live human-readable tail. Cursor SDK tools are not pi JSON `tool_execution_*` events; when pi-cursor-sdk is loaded, the runner also tails `cursor-activity.jsonl` (session sibling, or `cursor-activity-<n>.jsonl` in this directory when the child is fileless) and appends one-line `cursor start|done <title>: <summary>` rows to `output-<n>.log`. Those rows increment status `toolCount` once per Cursor tool identity; they do not consume the child's pi `toolBudget`.
 - Fallback information is persisted so background runs are debuggable after completion.
 
 For a top-level async run, `details.asyncDir` points at that directory; the final summary is written to Pi's subagent results directory as `<runId>.json`. Nested async runs use the same shape under the nested async root and are discoverable through status projections that read the nested-run registry. These files are append/update artifacts only; interactive foreground behavior is unchanged.

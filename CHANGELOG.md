@@ -3,12 +3,21 @@
 ## [Unreleased]
 
 ### Added
+- Tail Cursor SDK activity from a sidecar (`PI_CURSOR_ACTIVITY_LOG` / `cursor-activity.jsonl`) into live child progress. Cursor tools appear as `cursor:<tool>` recent-tool rows and one-line `output-<n>.log` summaries, and they increment status `toolCount` once per tool identity. They do not consume the child's pi `toolBudget`, become pi `toolUse` events, or replace an in-flight pi tool such as `contact_supervisor`. Completed Cursor edit/write/delete rows count as mutation evidence for the completion guard.
 - Add a global `timeoutMs` config option that sets the default run deadline for single, parallel, and chain launches (foreground, plus plain single-agent async) when neither the call nor the selected agent provides a timeout. It reaches parallel (`tasks: [...]`) and chain launches, which never adopt an agent's frontmatter `timeoutMs` (that default applies to single-agent launches only), so a long fan-out no longer falls back to the built-in 30-minute default and gets killed mid-run. Explicit call `timeoutMs`/`maxRuntimeMs` and agent frontmatter defaults still win; composite async runs stay unbounded at the top level by design. Thanks to @shaharmor for #1018.
 
 ### Changed
 - Let `/subagents-load-profile` open an interactive profile selector when called without a profile name.
+- Let the bundled reviewer follow relevant callers and adjacent risks instead of stopping early when an investigation branches.
+- Document the fork's fast-worker escalation path from DS4F to Luna and then Sol when a bounded task remains blocked.
+- Allow partitioned same-tree parallel writers when writable files are disjoint; otherwise keep one writer or isolate with worktrees.
+- Treat `replace` as a mutating write tool alongside `edit` and `write`.
 
 ### Fixed
+- When a Cursor-backed child has no pi-visible edit/write evidence, record `fileMutation.status: unavailable` instead of failing the completion guard as "no edits". Native Cursor mutations often never appear in the child transcript; inspect the worktree.
+- Share an explicit workflow deadline with awaited children without assigning omitted children the foreground 30-minute timeout; timeout and stop outcomes now cancel the awaited child and retain consistent workflow metadata.
+- Keep user-level `~/.pi` and `~/.agents` configuration from being discovered as project configuration for repositories below the home directory.
+- Forward an async workflow interrupt to its active in-process child controls without signaling the shared workflow host process.
 - Reject configured worktree base directories inside the agent extensions directory, including symlink aliases (#1014).
 - Align unnamed intercom fallback orchestrator targets with pi-intercom's 18-character registered presence names so subagents without an explicit session name can reach their orchestrator. Thanks to @mystery4f for #1017.
 - Stop reading hyphenated adjectives like "must-fix items" or "should-fix tests" as implementation intent, which made the completion mutation guard hard-fail read-only review runs with a false "completed without making edits" error. Severity compounds (must|should|needs + dash + verb) are stripped before verb matching across every mutation pattern (incl. update/add/apply/make/do siblings), the acceptance-level write-capability check, and the patch-scope pattern, while CLI flags ("eslint --fix", "prettier --write") and clause-level dashes ("branch—fix it") keep their write intent. Thanks to @MarcusNeufeldt for #1020.
@@ -63,7 +72,6 @@
 
 ### Fixed
 - Suspend subagent status widgets during automatic compaction to prevent duplicate terminal frames.
-- Share an explicit workflow deadline with awaited children without assigning omitted children the foreground 30-minute timeout; timeout and stop outcomes now cancel the awaited child and retain consistent workflow metadata.
 - Make live foreground workflow children visible as workflow-owned Fleet rows, route Herdr inspection to their workflow parent, and report their active and needs-attention state to Herdr. Thanks to @lukechen526 for #965.
 - Wait for retained-child resumes inside `workflowScript` to finish and return completed output before the script continues (#961).
 - Keep fork-context workflow children inside their managed worktree by aligning the persisted child session cwd before launch. Thanks to @flopsi for #953.

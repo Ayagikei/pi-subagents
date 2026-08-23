@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 import type { Message } from "@earendil-works/pi-ai";
 
 import {
 	evaluateCompletionMutationGuard,
 	expectsImplementationMutation,
+	fileMutationEffectStatus,
 	hasMutationToolCall,
 } from "../../src/runs/shared/completion-guard.ts";
 import { isMutatingTool } from "../../src/runs/shared/long-running-guard.ts";
@@ -35,6 +39,7 @@ test("implementation task with no mutation triggers the completion guard", () =>
 		expectedMutation: true,
 		attemptedMutation: false,
 		triggered: true,
+		evidence: "absent",
 	});
 });
 
@@ -50,6 +55,7 @@ test("declared read-only builtin tools suppress implementation-word false positi
 		expectedMutation: false,
 		attemptedMutation: false,
 		triggered: false,
+		evidence: "absent",
 	});
 });
 
@@ -64,6 +70,7 @@ test("hyphenated fix adjectives in review tasks do not trigger the completion gu
 		expectedMutation: false,
 		attemptedMutation: false,
 		triggered: false,
+		evidence: "absent",
 	});
 	assert.equal(
 		expectsImplementationMutation("worker", "Return a review with the top 2-3 must-fix items."),
@@ -84,6 +91,7 @@ test("read-only issue drafting tasks do not trigger on suggested fix wording", (
 		expectedMutation: false,
 		attemptedMutation: false,
 		triggered: false,
+		evidence: "absent",
 	});
 	assert.equal(expectsImplementationMutation("worker", task), false);
 	assert.equal(
@@ -119,6 +127,7 @@ test("worker with mutating-capable tools still triggers when no mutation is obse
 		expectedMutation: true,
 		attemptedMutation: false,
 		triggered: true,
+		evidence: "absent",
 	});
 });
 
@@ -135,6 +144,7 @@ test("oracle review tasks with bash available do not require mutation", () => {
 		expectedMutation: false,
 		attemptedMutation: false,
 		triggered: false,
+		evidence: "absent",
 	});
 });
 
@@ -368,5 +378,100 @@ test("implementation task with Cursor edit thinking does not trigger", () => {
 		expectedMutation: true,
 		attemptedMutation: true,
 		triggered: false,
+		evidence: "observed",
 	});
+});
+
+test("Cursor thinking edit traces remain observed for Cursor-backed models", () => {
+	const result = evaluateCompletionMutationGuard({
+		agent: "worker",
+		task: "Implement the approved fix",
+		messages: [assistantThinking("Cursor edit: src/foo.ts added 1 line\n")],
+		model: "cursor/grok-4.6",
+	});
+	assert.equal(result.evidence, "observed");
+	assert.equal(result.triggered, false);
+});
+
+test("Cursor sidecar completed edit is observed mutation evidence", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-activity-guard-"));
+	try {
+		const logPath = path.join(dir, "cursor-activity.jsonl");
+		fs.writeFileSync(logPath, `${JSON.stringify({
+			version: 1,
+			type: "cursor.tool.completed",
+			ts: "2026-08-23T00:00:00.000Z",
+			tool: "edit",
+			title: "Cursor edit",
+			summary: "src/foo.ts",
+			mutates: true,
+		})}\n`);
+		const result = evaluateCompletionMutationGuard({
+			agent: "worker",
+			task: "Implement the approved fix",
+			messages: [assistantText("Changed files and the build passed.")],
+			model: "cursor/grok-4.6",
+			activityLogPath: logPath,
+		});
+		assert.deepEqual(result, {
+			expectedMutation: true,
+			attemptedMutation: true,
+			triggered: false,
+			evidence: "observed",
+		});
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("Cursor-backed model without transcript mutation evidence is unavailable, not missing", () => {
+	const result = evaluateCompletionMutationGuard({
+		agent: "worker",
+		task: "Implement the approved fix",
+		messages: [assistantText("Changed files and the build passed.")],
+		model: "cursor/grok-4.6",
+	});
+	assert.deepEqual(result, {
+		expectedMutation: true,
+		attemptedMutation: false,
+		triggered: false,
+		evidence: "unavailable",
+	});
+});
+
+test("cursor-sdk-agent-lineage without transcript mutation evidence is unavailable", () => {
+	const lineage = {
+		type: "custom",
+		customType: "cursor-sdk-agent-lineage",
+		data: { runtime: "local" },
+	} as unknown as Message;
+	const result = evaluateCompletionMutationGuard({
+		agent: "worker",
+		task: "Implement the approved fix",
+		messages: [lineage, assistantText("Done.")],
+	});
+	assert.equal(result.evidence, "unavailable");
+	assert.equal(result.triggered, false);
+});
+
+test("non-Cursor model without mutation evidence still triggers", () => {
+	const result = evaluateCompletionMutationGuard({
+		agent: "worker",
+		task: "Implement the approved fix",
+		messages: [assistantText("Changed files and the build passed.")],
+		model: "grok-cli/grok-4.6",
+	});
+	assert.equal(result.evidence, "absent");
+	assert.equal(result.triggered, true);
+});
+
+test("unavailable Cursor evidence does not map to missing", () => {
+	assert.equal(
+		fileMutationEffectStatus({ expectedMutation: true, triggered: false, evidence: "unavailable" }),
+		"unavailable",
+	);
+	assert.equal(
+		fileMutationEffectStatus({ expectedMutation: true, triggered: true, evidence: "absent" }),
+		"missing",
+	);
 });

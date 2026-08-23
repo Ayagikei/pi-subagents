@@ -22,7 +22,7 @@ export const AGENT_MEMORY_FILE = "MEMORY.md";
 export const MAX_MEMORY_LINES = 200;
 const MAX_MEMORY_BYTES = 16 * 1024;
 
-const WRITE_TOOLS = new Set(["edit", "write", "bash"]);
+const WRITE_TOOLS = new Set(["edit", "replace", "write", "bash"]);
 
 function unquoteFrontmatterValue(value: string): string {
 	const trimmed = value.trim();

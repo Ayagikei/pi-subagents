@@ -41,6 +41,7 @@ import {
 	type ChildWatchdogConfig,
 } from "../../watchdog/child-status.ts";
 import { WAIT_TOOL_ENABLED_ENV } from "../background/wait-config.ts";
+import { CURSOR_ACTIVITY_LOG_ENV } from "./cursor-activity-log.ts";
 import {
 	PI_CODING_AGENT_PACKAGE_ROOT_ENV,
 	getAgentDir,
@@ -151,6 +152,7 @@ export interface BuildPiArgsInput {
 	childWatchdog?: ChildWatchdogConfig;
 	waitToolEnabled?: boolean;
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	cursorActivityLogPath?: string;
 }
 
 export interface BuildPiArgsResult {
@@ -737,6 +739,9 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	}
 	if (input.childIndex !== undefined) {
 		env[SUBAGENT_CHILD_INDEX_ENV] = String(input.childIndex);
+	}
+	if (input.cursorActivityLogPath) {
+		env[CURSOR_ACTIVITY_LOG_ENV] = input.cursorActivityLogPath;
 	}
 	if (!toolPlan.capabilityCeiling && input.mcpDirectTools?.length)
 		env.MCP_DIRECT_TOOLS = input.mcpDirectTools.join(",");

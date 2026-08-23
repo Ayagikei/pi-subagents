@@ -206,7 +206,7 @@ function messageIndicatesRepoEdit(message: unknown): boolean {
 	const role = input.role;
 	if (role !== "toolResult" && role !== "tool") return false;
 	const toolName = toolNameFromMessage(input);
-	return (toolName === "edit" || toolName === "write") && toolResultSucceeded(input);
+	return (toolName === "edit" || toolName === "replace" || toolName === "write") && toolResultSucceeded(input);
 }
 
 export function eventIndicatesRepoEdit(event: unknown): boolean {

@@ -84,7 +84,7 @@ return { api: api.artifactPaths, ui: ui.artifactPaths };
 
 Each child uses the existing worktree lifecycle: it branches from clean HEAD, journals ownership before launch, captures a patch and handoff manifest, then removes cleanly captured temporary worktrees and branches. The handoff manifest path remains available in the child's `artifactPaths`; return or emit it when the orchestrator needs to apply or inspect the patches. `runs.ref` stays concise and intentionally omits full paths.
 
-A top-level `{ workflowScript, worktree: true }` makes isolation the default for every workflow child. An individual child can override that default with `worktree: false`. Keep one writer when parallel writes are not intentionally isolated.
+A top-level `{ workflowScript, worktree: true }` makes isolation the default for every workflow child. An individual child can override that default with `worktree: false`. Parallel same-tree writers are allowed when writable files are disjoint and will not collide; otherwise keep one writer or isolate with worktrees.
 
 Configure the worktree base directory and setup hook in [configuration.md](configuration.md).
 

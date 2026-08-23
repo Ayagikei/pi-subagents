@@ -73,7 +73,7 @@ function redactEditWriteInput(input: unknown): unknown {
 }
 
 function formatToolArguments(name: string, input: unknown): string {
-	if (name === "edit" || name === "write") return formatValue(redactEditWriteInput(input));
+	if (name === "edit" || name === "replace" || name === "write") return formatValue(redactEditWriteInput(input));
 	return formatValue(input);
 }
 

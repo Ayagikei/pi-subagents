@@ -11,7 +11,7 @@ export const SUBAGENT_SAFETY_GUIDANCE = `SAFETY-CRITICAL SUBAGENT GUIDANCE:
 • Keep execution and management separate: omit action for workflowScript execution; use action only for management/control.
 • Outer async backgrounds the workflow; omitted/async:false workflow children stay awaited, while explicit child async:true is detached and does not inherit the workflow deadline. Do not sleep or poll status just to wait; use subagent_wait only when the current request must finish in this turn.
 • Ordinary child subagents are not orchestrators. Only explicitly configured fanout children may use the child-safe subagent tool, still bounded by depth/session limits.
-• Keep one writer for the same cwd/worktree. Use fresh-context read-only reviewers for independent review, then have the parent synthesize and apply fixes.
+• Keep writes non-conflicting: one writer per overlapping file set. Parallel writers in the same cwd/worktree are allowed when writable files are disjoint and the lanes will not collide. Use worktrees when isolation is needed; otherwise partition files explicitly. Use fresh-context read-only reviewers for independent review, then have the parent synthesize and apply fixes.
 • Async runs expose asyncId/asyncDir with status.json, events.jsonl, output logs, and status via { action: "status", id }. Include output paths and residual risks when reporting results.`;
 
 export const FULL_SUBAGENT_TOOL_DESCRIPTION = `Run subagents only through { workflowScript }; omit action. Use action only for management/control actions.
@@ -48,7 +48,7 @@ MANAGE / CONTROL:
 
 ASYNC / SAFETY:
 • Omitted async detaches background work. Do not sleep or poll merely to wait; use subagent_wait only when this turn must receive results.
-• Ordinary children are not orchestrators. Keep one writer per cwd/worktree and use fresh read-only reviewers for independent checks.
+• Ordinary children are not orchestrators. Parallel writers are allowed only with disjoint writable files and no colliding git/shared-file work; otherwise keep one writer per cwd/worktree. Use fresh read-only reviewers for independent checks.
 • Status and artifacts live under asyncId/asyncDir with status.json, events.jsonl, output logs, and {action:"status",id:"..."}.`;
 
 
