@@ -38,6 +38,7 @@ import { registerMainWatchdog } from "../watchdog/register-main.ts";
 import { registerSlashSubagentBridge } from "../slash/slash-bridge.ts";
 import { createNativeSupervisorChannel } from "../intercom/native-supervisor-channel.ts";
 import { registerHerdrStatusBridge, type HerdrStatusRun } from "../integrations/herdr-status.ts";
+import { createActivityPublisher } from "../integrations/activity-snapshot.ts";
 import { registerSubagentRpcBridge } from "./rpc.ts";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "../slash/slash-live-state.ts";
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
@@ -431,9 +432,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 		resolveCapabilityCeiling: (sessionId) => resolveCurrentSubagentCapabilityCeiling(sessionId),
 	});
-	const { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobs, dispose: disposeAsyncJobTracker } = createAsyncJobTracker(pi, state, DIRS.async, {
+	let activityPublisher: ReturnType<typeof createActivityPublisher> | undefined;
+	const { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobs, activityAvailable, dispose: disposeAsyncJobTracker } = createAsyncJobTracker(pi, state, DIRS.async, {
 		widgetEnabled: asyncWidgetEnabled,
+		onActivityChange: () => activityPublisher?.publish(),
 	});
+	activityPublisher = createActivityPublisher({ events: pi.events, state, available: activityAvailable });
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
 		pi,
 		state,
@@ -448,6 +452,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	);
 
 	const runtimeCleanup = () => {
+		activityPublisher?.dispose();
 		stopResultWatcher();
 		state.currentSessionId = null;
 		completionNotifier.dispose();
@@ -615,6 +620,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	pi.on("agent_end", async (_event, ctx) => {
 		if (!ctx.hasUI) await drainOutstandingWork({ state, events: pi.events });
+		activityPublisher?.publish();
 		const ownerSessionId = state.currentSessionId;
 		if (!ownerSessionId) return;
 		goalTurnId += 1;
@@ -692,6 +698,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	pi.on("tool_result", (event, ctx) => {
 		if (event.toolName !== "subagent") return;
+		activityPublisher?.publish();
 		if (!ctx.hasUI) return;
 		state.lastUiContext = ctx;
 		restoreActiveJobs(ctx);
@@ -758,13 +765,14 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		state.lastForegroundControlId = null;
 		resetJobs(ctx);
 		restoreForegroundRunHistory(state, { resultsDir: DIRS.results });
-		restoreActiveJobs(ctx);
+		restoreActiveJobs(ctx, true);
 		scheduledRunManager.bindSession(ctx);
 		restoreSlashFinalSnapshots(ctx.sessionManager.getEntries());
 		waitSubscriptionManager.restore();
 		startResultWatcher();
 		primeExistingResults({ triggerTurn: !recovering });
 		fleetStatus?.setContext(ctx);
+		activityPublisher?.start(ctx);
 	};
 
 	pi.on("agent_start", () => {
@@ -805,6 +813,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		activityPublisher?.dispose();
 		state.widgetsSuspended = false;
 		stopResultWatcher();
 		state.currentSessionId = null;

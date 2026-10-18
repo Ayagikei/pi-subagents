@@ -552,6 +552,7 @@ function persistRememberedForegroundRuns(state: SubagentState): void {
 
 function foregroundChildActivityFromProgress(progress: SingleResult["progress"] | undefined) {
 	return {
+		...(progress?.durationMs !== undefined ? { durationMs: progress.durationMs } : {}),
 		...(progress?.activityState ? { activityState: progress.activityState } : {}),
 		...(progress?.lastActivityAt !== undefined ? { lastActivityAt: progress.lastActivityAt } : {}),
 		...(progress?.currentTool ? { currentTool: progress.currentTool } : {}),

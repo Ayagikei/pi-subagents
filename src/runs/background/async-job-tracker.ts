@@ -18,7 +18,8 @@ import {
 import { readStatus, resolveWatchPath } from "../../shared/utils.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
-import { findNestedRouteForRootId, hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
+import { buildNestedRouteIndex, findNestedRouteForRootId, hasLiveNestedDescendants, updateAsyncJobNestedProjection, type NestedRoute } from "../shared/nested-events.ts";
+import { countNestedRuns } from "../shared/nested-render.ts";
 import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
 
 interface AsyncJobTrackerOptions {
@@ -29,6 +30,7 @@ interface AsyncJobTrackerOptions {
 	widgetEnabled?: boolean;
 	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 	now?: () => number;
+	onActivityChange?: () => void;
 }
 
 const CONTROL_EVENT_READ_CHUNK_BYTES = 64 * 1024;
@@ -43,7 +45,9 @@ function rememberFleetJob(state: SubagentState, job: AsyncJobState): void {
 	state.fleetJobs ??= new Map();
 	state.fleetJobs.set(job.asyncId, job);
 	const terminal = [...state.fleetJobs.values()]
-		.filter((candidate) => candidate.status === "complete" || candidate.status === "failed" || candidate.status === "paused" || candidate.status === "stopped")
+		.filter((candidate) => candidate.sessionId === job.sessionId
+			&& (candidate.status === "complete" || candidate.status === "failed" || candidate.status === "stopped" || candidate.status === "rejected")
+			&& !hasLiveNestedDescendants(candidate.nestedChildren) && countNestedRuns(candidate.nestedChildren).paused === 0)
 		.sort((left, right) => (right.updatedAt ?? right.startedAt ?? 0) - (left.updatedAt ?? left.startedAt ?? 0));
 	for (const stale of terminal.slice(MAX_RECENT_FLEET_JOBS)) state.fleetJobs.delete(stale.asyncId);
 }
@@ -54,8 +58,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	handleStarted: (data: unknown) => void;
 	handleComplete: (data: unknown) => void;
 	resetJobs: (ctx?: ExtensionContext) => void;
-	restoreActiveJobs: (ctx?: ExtensionContext) => void;
+	restoreActiveJobs: (ctx?: ExtensionContext, includeRecent?: boolean) => void;
 	dispose: () => void;
+	activityAvailable: () => boolean;
 } {
 	const completionRetentionMs = options.completionRetentionMs ?? 10000;
 	const livenessIntervalMs = options.pollIntervalMs ?? DEFAULT_LIVENESS_INTERVAL_MS;
@@ -64,6 +69,8 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	const jobWatchers = new Map<string, { watchers: Map<string, fs.FSWatcher>; retryTimer?: ReturnType<typeof setTimeout> }>();
 	const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	const runningJobIds = new Set<string>();
+	const unavailableJobs = new Set<string>();
+	let restorationFailed = false;
 	let rootWatcher: fs.FSWatcher | undefined;
 	let nextLivenessAt = Date.now() + livenessIntervalMs;
 	const rerenderWidget = (ctx: ExtensionContext, jobs = Array.from(state.asyncJobs.values())) => {
@@ -114,7 +121,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			return undefined;
 		}
 	};
-	const summaryToJob = (run: AsyncRunSummary): AsyncJobState => {
+	const summaryToJob = (run: AsyncRunSummary, nestedRoutes?: Map<string, NestedRoute>): AsyncJobState => {
 		const groups = normalizeParallelGroups(run.parallelGroups, run.steps.length, run.chainStepCount ?? run.steps.length);
 		const activeGroup = run.currentStep !== undefined
 			? groups.find((group) => run.currentStep! >= group.start && run.currentStep! < group.start + group.count)
@@ -149,6 +156,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			hasParallelGroups: groups.length > 0,
 			activeParallelGroup: Boolean(activeGroup),
 			startedAt: run.startedAt,
+			endedAt: run.endedAt,
 			updatedAt: run.lastUpdate ?? run.startedAt,
 			timeoutMs: run.timeoutMs,
 			deadlineAt: run.deadlineAt,
@@ -162,7 +170,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			totalTokens: run.totalTokens,
 			sessionFile: run.sessionFile,
 			controlEventCursor: restoredControlEventCursor(run.asyncDir),
-			nestedRoute: findNestedRouteForJob(run.id),
+			nestedRoute: nestedRoutes ? nestedRoutes.get(run.id) : findNestedRouteForJob(run.id),
 			nestedChildren: run.nestedChildren,
 			parentWorkflowRunId: run.parentWorkflowRunId,
 			workflowKey: run.workflowKey,
@@ -372,6 +380,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 				job.currentStep = status.currentStep ?? job.currentStep;
 				job.chainStepCount = status.chainStepCount ?? job.chainStepCount;
 				job.startedAt = status.startedAt ?? job.startedAt;
+				job.endedAt = status.endedAt ?? job.endedAt;
 				if (status.lastUpdate !== undefined) job.updatedAt = status.lastUpdate;
 				if (status.steps?.length) {
 					const groups = normalizeParallelGroups(status.parallelGroups, status.steps.length, status.chainStepCount ?? status.steps.length);
@@ -409,6 +418,8 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 						scheduleCleanup(job.asyncId);
 					}
 				}
+				if (nestedRefreshFailed) unavailableJobs.add(job.asyncId);
+				else unavailableJobs.delete(job.asyncId);
 				return widgetRenderKey(job) !== widgetStateBefore;
 			}
 			if (job.status === "queued") {
@@ -417,6 +428,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 				runningJobIds.add(job.asyncId);
 			}
 		} catch (error) {
+			unavailableJobs.add(job.asyncId);
 			if (job.status !== "failed") {
 				console.error(`Failed to read async status for '${job.asyncDir}':`, error);
 				job.status = "failed";
@@ -425,6 +437,8 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			runningJobIds.delete(job.asyncId);
 			rememberFleetJob(state, job);
 			if (!hasLiveNestedDescendants(job.nestedChildren) && !state.cleanupTimers.has(job.asyncId)) scheduleCleanup(job.asyncId);
+		} finally {
+			options.onActivityChange?.();
 		}
 		return widgetRenderKey(job) !== widgetStateBefore;
 	};
@@ -588,6 +602,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		scheduleJobRefresh(info.id, 0);
 		ensurePoller();
 		rerenderLastWidget();
+		options.onActivityChange?.();
 	};
 
 	const handleComplete = (data: unknown) => {
@@ -602,6 +617,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			runningJobIds.delete(asyncId);
 			job.stopped = result.stopped ?? job.stopped;
 			job.updatedAt = Date.now();
+			job.endedAt ??= job.updatedAt;
 			if (result.asyncDir && result.asyncDir !== job.asyncDir) {
 				closeJobWatcher(asyncId);
 				job.asyncDir = result.asyncDir;
@@ -616,6 +632,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		}
 		if (job) rememberFleetJob(state, job);
 		rerenderLastWidget();
+		if (nestedRefreshFailed) unavailableJobs.add(asyncId);
+		else unavailableJobs.delete(asyncId);
+		options.onActivityChange?.();
 		if (!nestedRefreshFailed && !hasLiveNestedDescendants(job?.nestedChildren)) scheduleCleanup(asyncId);
 	};
 
@@ -632,6 +651,8 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 
 	const resetJobs = (ctx?: ExtensionContext) => {
 		dispose();
+		unavailableJobs.clear();
+		restorationFailed = false;
 		for (const timer of state.cleanupTimers.values()) clearTimeout(timer);
 		state.cleanupTimers.clear();
 		state.asyncJobs.clear();
@@ -645,27 +666,48 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		}
 	};
 
-	const restoreActiveJobs = (ctx?: ExtensionContext) => {
+	const restoreActiveJobs = (ctx?: ExtensionContext, includeRecent = false) => {
 		if (ctx?.hasUI) state.lastUiContext = ctx;
 		if (!state.currentSessionId) return;
 		let runs: AsyncRunSummary[];
+		let nestedRoutes: Map<string, NestedRoute> | undefined;
 		try {
 			runs = listAsyncRuns(asyncDirRoot, { states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir, kill: options.kill, now: options.now });
+			if (includeRecent) {
+				// One status-only inventory on session load: filter session before terminal retention.
+				// Paused work and terminal roots with live descendants cannot be globally truncated.
+				const activeIds = new Set(runs.map(run => run.id));
+				runs.push(...listAsyncRuns(asyncDirRoot, { sessionId: state.currentSessionId, reconcile: false }).filter(run => !activeIds.has(run.id)));
+				if (runs.length) nestedRoutes = buildNestedRouteIndex();
+			}
 		} catch (error) {
 			console.error(`Failed to restore active async jobs from '${asyncDirRoot}':`, error);
+			restorationFailed = true;
+			options.onActivityChange?.();
 			return;
 		}
+		restorationFailed = false;
 		for (const run of runs) {
-			const job = summaryToJob(run);
-			state.asyncJobs.set(run.id, job);
-			if (job.status === "running") runningJobIds.add(job.asyncId);
+			const job = summaryToJob(run, nestedRoutes);
+			try {
+				updateAsyncJobNestedProjection(job);
+				unavailableJobs.delete(job.asyncId);
+			} catch (error) {
+				unavailableJobs.add(job.asyncId);
+				console.error(`Failed to restore nested async descendants for '${job.asyncDir}':`, error);
+			}
 			rememberFleetJob(state, job);
-			watchJob(job);
+			if (job.status === "running" || job.status === "queued" || hasLiveNestedDescendants(job.nestedChildren) || unavailableJobs.has(job.asyncId)) {
+				cancelCleanup(job.asyncId);
+				state.asyncJobs.set(run.id, job);
+				if (job.status === "running") runningJobIds.add(job.asyncId);
+				watchJob(job);
+			}
 		}
-		if (runs.length === 0) return;
+		if (state.asyncJobs.size === 0) return;
 		ensurePoller();
 		rerenderLastWidget();
 	};
 
-	return { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobs, dispose };
+	return { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobs, dispose, activityAvailable: () => !restorationFailed && unavailableJobs.size === 0 };
 }

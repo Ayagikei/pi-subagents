@@ -103,6 +103,10 @@ or ask: "Check whether subagents and intercom are set up correctly."
 
 For installed-version help, use `/subagents-guide [topic]` or `subagent({ action: "guide", topic: "workflows" })`. The default topic is `overview`; available topics are `overview`, `workflows`, `agents`, `missions`, `observability`, `tool-reference`, `configuration`, `models`, `watchdog`, and `extension-api`.
 
+
+### Pilo activity projection
+
+Pilo can show running subtasks beside the parent session, including parents running in an external terminal. The activity publisher sends a bounded `pilo-subagents` widget in `PILO_RPC_UI=1` RPC sessions and writes private atomic summaries under `$PI_CODING_AGENT_DIR/extensions/subagent/pilo-activity/` (default `~/.pi/agent`). Summaries include short task labels, native state, existing usage, and actual last activity; they do not copy tool output or full conversations. A heartbeat is observation, not activity. Pilo checks the Pi header UUID and canonical parent session file, marks stale/conflicting writers as unknown, and provides read-only details. Existing Pi sessions need `/reload` or a restart to load this bridge. Native run ownership still uses its original session identity; only the Pilo boundary normalizes to the header UUID.
 ## Documentation
 
 The full reference lives in `docs/`:

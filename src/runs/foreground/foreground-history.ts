@@ -33,6 +33,7 @@ function compactChild(child: ForegroundResumeChild): ForegroundResumeChild {
 		...(child.thinking ? { thinking: child.thinking } : {}),
 		status: child.status,
 		...(child.activityState ? { activityState: child.activityState } : {}),
+		...(child.durationMs !== undefined ? { durationMs: child.durationMs } : {}),
 		...(child.lastActivityAt !== undefined ? { lastActivityAt: child.lastActivityAt } : {}),
 		...(child.currentTool ? { currentTool: child.currentTool } : {}),
 		...(child.currentToolStartedAt !== undefined ? { currentToolStartedAt: child.currentToolStartedAt } : {}),

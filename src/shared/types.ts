@@ -1445,6 +1445,7 @@ export interface AsyncJobState {
 	hasParallelGroups?: boolean;
 	activeParallelGroup?: boolean;
 	startedAt?: number;
+	endedAt?: number;
 	updatedAt?: number;
 	timeoutMs?: number;
 	deadlineAt?: number;
@@ -1477,6 +1478,7 @@ export interface ForegroundResumeChild {
 	model?: string;
 	thinking?: string;
 	status: SubagentResultStatus;
+	durationMs?: number;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;

@@ -593,46 +593,52 @@ describe("subagent prompt runtime", () => {
 		}
 	});
 
-	it("registers child watchdog lifecycle handlers only when enabled by env", () => {
-		delete process.env[CHILD_WATCHDOG_CONFIG_ENV];
-		// Clear the ack capture env explicitly: when this test suite itself runs inside a
-		// pi-subagents child, the runner sets it and an extra agent_end handler registers.
+	it("registers child watchdog lifecycle handlers only when enabled, with or without steering", async t => {
+		// Isolate runtime-owned env even when this suite runs inside a real child.
 		delete process.env[RUNTIME_EXTENSION_ACK_PATH_ENV];
-		const handlersWithout = new Map<string, unknown[]>();
-		registerSubagentPromptRuntime({
-			on(event: string, handler: unknown) {
-				handlersWithout.set(event, [...(handlersWithout.get(event) ?? []), handler]);
-			},
-		} as { on(event: string, handler: unknown): void });
-		assert.equal(handlersWithout.get("agent_end")?.length ?? 0, 1, "headless auto-drain is always registered");
-
-		process.env[CHILD_WATCHDOG_CONFIG_ENV] = JSON.stringify({
-			enabled: true,
-			runId: "run-1",
-			agent: "worker",
-			childIndex: 0,
-			watchdogTailTimeoutMs: 1000,
-			agentEndTimeoutMs: 500,
-			maxWarnings: null,
-			lsp: { enabled: false, timeoutMs: 3000, maxFiles: 20, maxDiagnostics: 50 },
-			autoFollowBlockers: false,
-			autoFollowMaxAttempts: 3,
-			stalemateRepeats: 2,
-		});
-		const handlersWith = new Map<string, unknown[]>();
-		registerSubagentPromptRuntime({
-			on(event: string, handler: unknown) {
-				handlersWith.set(event, [...(handlersWith.get(event) ?? []), handler]);
-			},
-			getThinkingLevel() {
-				return "off";
-			},
-			sendMessage() {},
-		} as { on(event: string, handler: unknown): void; getThinkingLevel(): string; sendMessage(): void });
-
-		assert.ok((handlersWith.get("before_agent_start")?.length ?? 0) >= 2);
-		assert.ok((handlersWith.get("turn_end")?.length ?? 0) >= 1);
-		assert.ok((handlersWith.get("agent_end")?.length ?? 0) >= 2, "watchdog and auto-drain both observe agent_end");
+		delete process.env[STRUCTURED_OUTPUT_CAPTURE_ENV];
+		delete process.env[STRUCTURED_OUTPUT_SCHEMA_ENV];
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-lifecycle-"));
+		try {
+			for (const steering of [false, true]) {
+				if (steering) process.env[SUBAGENT_STEER_INBOX_ENV] = path.join(dir, "inbox");
+				else delete process.env[SUBAGENT_STEER_INBOX_ENV];
+				const register = () => {
+					const handlers = new Map<string, ((event: unknown, ctx?: unknown) => unknown)[]>();
+					registerSubagentPromptRuntime({
+						on(event: string, handler: (event: unknown, ctx?: unknown) => unknown) {
+							handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+						},
+						getThinkingLevel() { return "off"; },
+						sendMessage() {},
+					} as never);
+					return handlers;
+				};
+				delete process.env[CHILD_WATCHDOG_CONFIG_ENV];
+				const without = register();
+				assert.equal(without.get("agent_end")?.length ?? 0, steering ? 2 : 1, "only auto-drain and optional steering observe agent_end when watchdog is absent");
+				assert.equal(without.get("turn_end")?.length ?? 0, steering ? 1 : 0);
+				assert.equal(without.get("session_shutdown")?.length ?? 0, steering ? 1 : 0, "publisher shutdown is not part of the child prompt runtime");
+				const config = { enabled: false, runId: "run-1", agent: "worker", childIndex: 0, watchdogTailTimeoutMs: 1000, agentEndTimeoutMs: 500, maxWarnings: null, lsp: { enabled: false, timeoutMs: 3000, maxFiles: 20, maxDiagnostics: 50 }, autoFollowBlockers: false, autoFollowMaxAttempts: 3, stalemateRepeats: 2 };
+				process.env[CHILD_WATCHDOG_CONFIG_ENV] = JSON.stringify(config);
+				const disabled = register();
+				assert.deepEqual([...disabled].map(([event, handlers]) => [event, handlers.length]), [...without].map(([event, handlers]) => [event, handlers.length]), "explicitly disabled watchdog adds no lifecycle handlers");
+				process.env[CHILD_WATCHDOG_CONFIG_ENV] = JSON.stringify({ ...config, enabled: true });
+				const withWatchdog = register();
+				for (const event of ["session_start", "before_agent_start", "turn_end", "agent_end", "session_shutdown"]) {
+					assert.equal(withWatchdog.get(event)?.length ?? 0, (without.get(event)?.length ?? 0) + 1, `enabled watchdog adds exactly one ${event} handler`);
+				}
+				await without.get("agent_end")!.at(-1)!({}, { hasUI: true });
+				const output: string[] = [];
+				t.mock.method(process.stdout, "write", (data: string) => { output.push(data); return true; });
+				try {
+					// Steering registers first; this final handler is the watchdog disposal hook.
+					await withWatchdog.get("session_shutdown")!.at(-1)!({});
+					assert.equal(JSON.parse(output[0]!).phase, "idle");
+					assert.equal(JSON.parse(output[0]!).runId, "run-1");
+				} finally { t.mock.restoreAll(); }
+			}
+		} finally { fs.rmSync(dir, { recursive: true, force: true }); }
 	});
 
 	it("registered structured_output tool accepts valid schema output and writes the capture file", async () => {

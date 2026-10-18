@@ -70,9 +70,10 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": ">=0.80.0",
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-agent-core": {
@@ -86,11 +87,13 @@
     },
     "@earendil-works/pi-tui": {
       "optional": true
+    },
+    "typebox": {
+      "optional": true
     }
   },
   "dependencies": {
     "jiti": "2.7.0",
-    "typebox": "1.1.38",
     "yaml": "2.8.3"
   },
   "devDependencies": {
@@ -98,6 +101,7 @@
     "@earendil-works/pi-ai": "0.81.0",
     "@earendil-works/pi-tui": "0.81.0",
     "@types/node": "24.13.3",
+    "typebox": "1.1.38",
     "typescript": "5.9.3",
     "@earendil-works/pi-coding-agent": "file:./test/fixtures/pi-coding-agent-shim"
   }
